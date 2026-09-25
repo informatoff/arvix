@@ -1,6 +1,12 @@
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import aiosqlite
 
 from utils.levels import xp_needed
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
