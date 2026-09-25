@@ -1,3 +1,9 @@
+import os
+import sys
+
+# Добавляем директорию бота в sys.path для Railway/Docker
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import asyncio
 import logging
 
@@ -8,6 +14,7 @@ from discord.ext import commands
 import config
 from db import Database
 from utils.fonts import ensure_fonts
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("arvix")
