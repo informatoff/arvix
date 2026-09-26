@@ -57,18 +57,13 @@ class VerificationModal(discord.ui.Modal, title="Получение доступ
         link_display = link if link.startswith(("http://", "https://")) else f"`{link}`"
 
         embed = discord.Embed(
-            title="📋 Новая заявка на верификацию",
+            title="Заявка на верификацию",
             color=config.BRAND_COLOR,
         )
-        embed.set_author(name=str(user), icon_url=user.display_avatar.url)
-        embed.add_field(
-            name="👤 Участник",
-            value=f"{user.mention} (`{user.id}`)",
-            inline=False,
-        )
-        embed.add_field(name="📝 Ник", value=self.nickname.value, inline=True)
-        embed.add_field(name="🏷️ Должность", value=self.position.value, inline=True)
-        embed.add_field(name="🖇️ Пруф", value=link_display, inline=False)
+        embed.add_field(name="Участник", value=f"{user.mention} (`{user.id}`)", inline=False)
+        embed.add_field(name="Ник", value=self.nickname.value, inline=False)
+        embed.add_field(name="Должность", value=self.position.value, inline=False)
+        embed.add_field(name="Доказательство", value=link_display, inline=False)
         embed.set_footer(text=_ts())
 
         if link.startswith(("http://", "https://")):
@@ -159,7 +154,7 @@ class VerificationReviewView(discord.ui.View):
         old_embed = interaction.message.embeds[0]
         old_embed.color = config.SUCCESS_COLOR
         old_embed.add_field(
-            name="✅ Решение",
+            name="Решение",
             value=f"Одобрено {interaction.user.mention}",
             inline=False,
         )
@@ -195,7 +190,7 @@ class VerificationReviewView(discord.ui.View):
         old_embed = interaction.message.embeds[0]
         old_embed.color = config.DANGER_COLOR
         old_embed.add_field(
-            name="❌ Решение",
+            name="Решение",
             value=f"Отклонено {interaction.user.mention}",
             inline=False,
         )
