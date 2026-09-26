@@ -25,6 +25,7 @@ EXTENSIONS = (
     "cogs.profile",
     "cogs.news",
     "cogs.tickets",
+    "cogs.verification",
     "cogs.info",
     "cogs.top",
     "cogs.economy",
