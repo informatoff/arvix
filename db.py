@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     ticket_role_id             INTEGER,
     ticket_log_channel_id      INTEGER,
     ticket_archive_category_id INTEGER,
-    give_role_id               INTEGER
+    give_role_id               INTEGER,
+    verification_role_id       INTEGER,
+    verification_log_channel_id INTEGER
 );
 CREATE TABLE IF NOT EXISTS users (
     guild_id      INTEGER,
@@ -69,6 +71,8 @@ SETTING_FIELDS = {
     "ticket_log_channel_id",
     "ticket_archive_category_id",
     "give_role_id",
+    "verification_role_id",
+    "verification_log_channel_id",
 }
 
 _MIGRATE_SETTINGS = [
@@ -78,6 +82,8 @@ _MIGRATE_SETTINGS = [
     "welcome_channel_id INTEGER",
     "ticket_archive_category_id INTEGER",
     "give_role_id INTEGER",
+    "verification_role_id INTEGER",
+    "verification_log_channel_id INTEGER",
 ]
 _MIGRATE_TICKETS = [
     "details TEXT",
