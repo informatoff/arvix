@@ -16,8 +16,7 @@ SETTING_MAP = {
     "ticket_log_channel_id":      ("Канал логов тикетов", "channel", [discord.ChannelType.text]),
     "ticket_archive_category_id": ("Категория архива тикетов", "channel", [discord.ChannelType.category]),
     "give_role_id":               ("Роль для /give", "role", None),
-    "verification_log_channel_id": ("Канал заявок верификации", "channel", [discord.ChannelType.text]),
-    "verification_role_id":       ("Роль после верификации", "role", None),
+    "promo_role_id":              ("Роль для /promoadd", "role", None),
 }
 
 
