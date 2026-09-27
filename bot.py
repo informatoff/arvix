@@ -29,7 +29,8 @@ EXTENSIONS = (
     "cogs.top",
     "cogs.economy",
     "cogs.logging",
-    "cogs.verification",
+    "cogs.promocode",
+    "cogs.rep",
 )
 
 
@@ -60,7 +61,7 @@ class Arvix(commands.Bot):
             max_messages=5000,
             help_command=None,
         )
-        self.db = Database(config.DATABASE_URL)
+        self.db = Database(config.DB_PATH)
         self.tree.on_error = on_tree_error
 
     async def setup_hook(self):
@@ -88,9 +89,4 @@ class Arvix(commands.Bot):
 if __name__ == "__main__":
     if not config.TOKEN:
         raise SystemExit("Укажи DISCORD_TOKEN в файле .env")
-    if not config.DATABASE_URL:
-        raise SystemExit(
-            "Укажи DATABASE_URL (подключи Postgres к сервису в Railway — "
-            "переменная подставится автоматически)."
-        )
     Arvix().run(config.TOKEN)
