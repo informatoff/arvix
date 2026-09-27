@@ -27,7 +27,7 @@ def _ts() -> str:
 class RepModal(discord.ui.Modal, title="Оставить отзыв"):
     nickname = discord.ui.TextInput(
         label="Ваш ник",
-        placeholder="Например: Noim Nurzhanov",
+        placeholder="Например: fearless",
         max_length=100,
     )
     review_text = discord.ui.TextInput(
