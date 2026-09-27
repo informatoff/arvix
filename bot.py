@@ -61,7 +61,7 @@ class Arvix(commands.Bot):
             max_messages=5000,
             help_command=None,
         )
-        self.db = Database(config.DB_PATH)
+        self.db = Database(config.DATABASE_URL)
         self.tree.on_error = on_tree_error
 
     async def setup_hook(self):
@@ -88,5 +88,11 @@ class Arvix(commands.Bot):
 
 if __name__ == "__main__":
     if not config.TOKEN:
-        raise SystemExit("Укажи DISCORD_TOKEN в файле .env")
+        raise SystemExit("Укажи DISCORD_TOKEN в переменных окружения (.env или Railway Variables)")
+    if not config.DATABASE_URL:
+        raise SystemExit(
+            "Укажи DATABASE_URL в переменных окружения. "
+            "На Railway: подключи сервис Postgres к этому проекту — "
+            "переменная DATABASE_URL появится автоматически (обычно через Variable Reference)."
+        )
     Arvix().run(config.TOKEN)
