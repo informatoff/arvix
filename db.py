@@ -13,18 +13,20 @@ from utils.levels import xp_needed
 # SERIAL вместо AUTOINCREMENT, TIMESTAMPTZ вместо TEXT для дат.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
-    guild_id                   BIGINT PRIMARY KEY,
-    news_channel_id            BIGINT,
-    modlog_channel_id          BIGINT,
-    msglog_channel_id          BIGINT,
-    voicelog_channel_id        BIGINT,
-    levelup_channel_id         BIGINT,
-    welcome_channel_id         BIGINT,
-    ticket_category_id         BIGINT,
-    ticket_role_id              BIGINT,
-    ticket_log_channel_id      BIGINT,
+    guild_id                     BIGINT PRIMARY KEY,
+    news_channel_id              BIGINT,
+    modlog_channel_id            BIGINT,
+    msglog_channel_id            BIGINT,
+    voicelog_channel_id         BIGINT,
+    levelup_channel_id           BIGINT,
+    welcome_channel_id           BIGINT,
+    ticket_category_id           BIGINT,
+    ticket_role_id               BIGINT,
+    ticket_log_channel_id       BIGINT,
     ticket_archive_category_id BIGINT,
-    give_role_id                BIGINT
+    give_role_id                  BIGINT,
+    verification_log_channel_id BIGINT,
+    verification_role_id         BIGINT
 );
 CREATE TABLE IF NOT EXISTS users (
     guild_id      BIGINT,
@@ -74,6 +76,8 @@ SETTING_FIELDS = {
     "ticket_log_channel_id",
     "ticket_archive_category_id",
     "give_role_id",
+    "verification_log_channel_id",
+    "verification_role_id",
 }
 
 
@@ -108,11 +112,27 @@ class Database:
     async def connect(self):
         # Railway обычно даёт DATABASE_URL вида postgres://... — asyncpg требует postgresql://
         dsn = self.dsn
+        if not dsn:
+            raise RuntimeError(
+                "DATABASE_URL пустой или не задан. Проверь в Railway: "
+                "сервис бота → Variables → должна быть переменная DATABASE_URL, "
+                "привязанная (Reference) к твоему Postgres-сервису."
+            )
         if dsn.startswith("postgres://"):
             dsn = "postgresql://" + dsn[len("postgres://"):]
         self.pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=10)
         async with self.pool.acquire() as conn:
             await conn.execute(SCHEMA)
+            # На случай, если таблица guild_settings уже существовала без новых колонок
+            # (например, после более ранней версии схемы) — добираем недостающее руками.
+            for col in ("verification_log_channel_id BIGINT", "verification_role_id BIGINT"):
+                col_name = col.split()[0]
+                try:
+                    await conn.execute(
+                        f"ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS {col}"
+                    )
+                except Exception:
+                    pass
 
     async def close(self):
         if self.pool:
