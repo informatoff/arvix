@@ -29,6 +29,7 @@ EXTENSIONS = (
     "cogs.top",
     "cogs.economy",
     "cogs.logging",
+    "cogs.verification",
 )
 
 
