@@ -3,77 +3,79 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import aiosqlite
+import asyncpg
 
 from utils.levels import xp_needed
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS guild_settings (
-    guild_id                   INTEGER PRIMARY KEY,
-    news_channel_id            INTEGER,
-    modlog_channel_id          INTEGER,
-    msglog_channel_id          INTEGER,
-    voicelog_channel_id        INTEGER,
-    levelup_channel_id         INTEGER,
-    welcome_channel_id         INTEGER,
-    ticket_category_id         INTEGER,
-    ticket_role_id             INTEGER,
-    ticket_log_channel_id      INTEGER,
-    ticket_archive_category_id INTEGER,
-    give_role_id               INTEGER,
-    promo_role_id               INTEGER
+    guild_id                   BIGINT PRIMARY KEY,
+    news_channel_id            BIGINT,
+    modlog_channel_id          BIGINT,
+    msglog_channel_id          BIGINT,
+    voicelog_channel_id        BIGINT,
+    levelup_channel_id         BIGINT,
+    welcome_channel_id         BIGINT,
+    ticket_category_id         BIGINT,
+    ticket_role_id             BIGINT,
+    ticket_log_channel_id      BIGINT,
+    ticket_archive_category_id BIGINT,
+    give_role_id               BIGINT,
+    promo_role_id              BIGINT
 );
 CREATE TABLE IF NOT EXISTS users (
-    guild_id      INTEGER,
-    user_id       INTEGER,
+    guild_id      BIGINT,
+    user_id       BIGINT,
     xp            INTEGER DEFAULT 0,
     level         INTEGER DEFAULT 0,
-    coins         INTEGER DEFAULT 0,
+    coins         BIGINT DEFAULT 0,
+    bank          BIGINT DEFAULT 0,
+    rep           INTEGER DEFAULT 0,
     messages      INTEGER DEFAULT 0,
     voice_seconds INTEGER DEFAULT 0,
     PRIMARY KEY (guild_id, user_id)
 );
 CREATE TABLE IF NOT EXISTS tickets (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id   INTEGER,
-    channel_id INTEGER,
-    user_id    INTEGER,
+    id         SERIAL PRIMARY KEY,
+    guild_id   BIGINT,
+    channel_id BIGINT,
+    user_id    BIGINT,
     topic      TEXT,
     details    TEXT,
-    claimed_by INTEGER,
-    closed_by  INTEGER,
+    claimed_by BIGINT,
+    closed_by  BIGINT,
     rating     INTEGER,
     status     TEXT DEFAULT 'open',
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
     closed_at  TEXT
 );
 CREATE TABLE IF NOT EXISTS shop_items (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id    INTEGER,
-    role_id     INTEGER,
-    price       INTEGER,
+    id          SERIAL PRIMARY KEY,
+    guild_id    BIGINT,
+    role_id     BIGINT,
+    price       BIGINT,
     name        TEXT,
     description TEXT
 );
 CREATE TABLE IF NOT EXISTS promocodes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id    INTEGER,
+    id          SERIAL PRIMARY KEY,
+    guild_id    BIGINT,
     code        TEXT,
     type        INTEGER,
     prize_name  TEXT,
-    amount      INTEGER,
+    amount      BIGINT,
     uses_left   INTEGER,
-    created_by  INTEGER,
-    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    created_by  BIGINT,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
     active      INTEGER DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS promo_redemptions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     promocode_id INTEGER,
-    guild_id     INTEGER,
-    user_id      INTEGER,
-    redeemed_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    guild_id     BIGINT,
+    user_id      BIGINT,
+    redeemed_at  TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(promocode_id, user_id)
 );
 """
@@ -93,23 +95,25 @@ SETTING_FIELDS = {
     "promo_role_id",
 }
 
+# Columns that must exist; applied with ADD COLUMN IF NOT EXISTS on connect,
+# so both fresh and pre-existing Postgres databases end up consistent.
 _MIGRATE_SETTINGS = [
-    "msglog_channel_id INTEGER",
-    "voicelog_channel_id INTEGER",
-    "levelup_channel_id INTEGER",
-    "welcome_channel_id INTEGER",
-    "ticket_archive_category_id INTEGER",
-    "give_role_id INTEGER",
-    "promo_role_id INTEGER",
+    "msglog_channel_id BIGINT",
+    "voicelog_channel_id BIGINT",
+    "levelup_channel_id BIGINT",
+    "welcome_channel_id BIGINT",
+    "ticket_archive_category_id BIGINT",
+    "give_role_id BIGINT",
+    "promo_role_id BIGINT",
 ]
 _MIGRATE_TICKETS = [
     "details TEXT",
-    "closed_by INTEGER",
+    "closed_by BIGINT",
     "rating INTEGER",
     "closed_at TEXT",
 ]
 _MIGRATE_USERS = [
-    "bank INTEGER DEFAULT 0",
+    "bank BIGINT DEFAULT 0",
     "rep INTEGER DEFAULT 0",
 ]
 _MIGRATE_SHOP = [
@@ -117,53 +121,109 @@ _MIGRATE_SHOP = [
 ]
 
 
+def _to_pg(query: str) -> str:
+    """Converts '?' positional placeholders (SQLite-style, used throughout
+    this codebase) into asyncpg's '$1, $2, ...' style, left to right."""
+    parts = query.split("?")
+    if len(parts) == 1:
+        return query
+    out = [parts[0]]
+    for i, part in enumerate(parts[1:], start=1):
+        out.append(f"${i}")
+        out.append(part)
+    return "".join(out)
+
+
+class _RowWrapper(dict):
+    """Thin wrapper so callers can do row["col"] like sqlite3.Row/aiosqlite.Row."""
+    def __getitem__(self, key):
+        return dict.get(self, key)
+
+    def get(self, key, default=None):
+        return dict.get(self, key, default)
+
+
+def _wrap(record):
+    if record is None:
+        return None
+    return _RowWrapper(record)
+
+
+class _ExecResult:
+    """Mimics the subset of aiosqlite's cursor API this codebase relies on:
+    .lastrowid and .rowcount."""
+    def __init__(self, lastrowid=None, rowcount=0):
+        self.lastrowid = lastrowid
+        self.rowcount = rowcount
+
+
 class Database:
-    def __init__(self, path: str):
-        self.path = path
-        self.conn: aiosqlite.Connection | None = None
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+        self.pool: asyncpg.Pool | None = None
 
     async def connect(self):
-        self.conn = await aiosqlite.connect(self.path)
-        self.conn.row_factory = aiosqlite.Row
-        await self.conn.executescript(SCHEMA)
-        for col in _MIGRATE_SETTINGS:
-            try:
-                await self.conn.execute(f"ALTER TABLE guild_settings ADD COLUMN {col}")
-            except Exception:
-                pass
-        for col in _MIGRATE_TICKETS:
-            try:
-                await self.conn.execute(f"ALTER TABLE tickets ADD COLUMN {col}")
-            except Exception:
-                pass
-        for col in _MIGRATE_USERS:
-            try:
-                await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col}")
-            except Exception:
-                pass
-        for col in _MIGRATE_SHOP:
-            try:
-                await self.conn.execute(f"ALTER TABLE shop_items ADD COLUMN {col}")
-            except Exception:
-                pass
-        await self.conn.commit()
+        self.pool = await asyncpg.create_pool(dsn=self.dsn, min_size=1, max_size=10)
+        async with self.pool.acquire() as conn:
+            for statement in filter(None, (s.strip() for s in SCHEMA.split(";"))):
+                await conn.execute(statement)
+            for col in _MIGRATE_SETTINGS:
+                try:
+                    await conn.execute(f"ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS {col}")
+                except Exception:
+                    pass
+            for col in _MIGRATE_TICKETS:
+                try:
+                    await conn.execute(f"ALTER TABLE tickets ADD COLUMN IF NOT EXISTS {col}")
+                except Exception:
+                    pass
+            for col in _MIGRATE_USERS:
+                try:
+                    await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col}")
+                except Exception:
+                    pass
+            for col in _MIGRATE_SHOP:
+                try:
+                    await conn.execute(f"ALTER TABLE shop_items ADD COLUMN IF NOT EXISTS {col}")
+                except Exception:
+                    pass
 
     async def close(self):
-        if self.conn:
-            await self.conn.close()
+        if self.pool:
+            await self.pool.close()
 
     async def execute(self, query: str, *args):
-        cur = await self.conn.execute(query, args)
-        await self.conn.commit()
-        return cur
+        """Generic write. Returns an object exposing .rowcount."""
+        pg_query = _to_pg(query)
+        async with self.pool.acquire() as conn:
+            status = await conn.execute(pg_query, *args)
+        # asyncpg status strings look like "UPDATE 3", "INSERT 0 1", "DELETE 1"
+        rowcount = 0
+        if status:
+            tail = status.strip().split()[-1]
+            if tail.isdigit():
+                rowcount = int(tail)
+        return _ExecResult(lastrowid=None, rowcount=rowcount)
+
+    async def _execute_returning_id(self, query: str, *args) -> int:
+        pg_query = _to_pg(query)
+        if "RETURNING" not in pg_query.upper():
+            pg_query += " RETURNING id"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(pg_query, *args)
+        return row["id"] if row else None
 
     async def fetchone(self, query: str, *args):
-        async with self.conn.execute(query, args) as cur:
-            return await cur.fetchone()
+        pg_query = _to_pg(query)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(pg_query, *args)
+        return _wrap(row)
 
     async def fetchall(self, query: str, *args):
-        async with self.conn.execute(query, args) as cur:
-            return await cur.fetchall()
+        pg_query = _to_pg(query)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(pg_query, *args)
+        return [_wrap(r) for r in rows]
 
     async def get_settings(self, guild_id: int):
         return await self.fetchone(
@@ -174,7 +234,7 @@ class Database:
         assert fields and set(fields) <= SETTING_FIELDS
         cols = ", ".join(fields)
         placeholders = ", ".join("?" for _ in fields)
-        updates = ", ".join(f"{k}=excluded.{k}" for k in fields)
+        updates = ", ".join(f"{k}=EXCLUDED.{k}" for k in fields)
         await self.execute(
             f"INSERT INTO guild_settings (guild_id, {cols}) VALUES (?, {placeholders}) "
             f"ON CONFLICT(guild_id) DO UPDATE SET {updates}",
@@ -215,7 +275,7 @@ class Database:
     async def add_coins(self, guild_id: int, user_id: int, amount: int):
         await self.execute(
             "INSERT INTO users (guild_id, user_id, coins) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET coins=coins+?",
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET coins=users.coins+?",
             guild_id, user_id, amount, amount,
         )
 
@@ -229,7 +289,7 @@ class Database:
         )
         await self.execute(
             "INSERT INTO users (guild_id, user_id, coins) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET coins=coins+?",
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET coins=users.coins+?",
             guild_id, to_user, amount, amount,
         )
         return True
@@ -257,7 +317,7 @@ class Database:
     async def add_rep(self, guild_id: int, user_id: int, amount: int = 1):
         await self.execute(
             "INSERT INTO users (guild_id, user_id, rep) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET rep=COALESCE(rep, 0)+?",
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET rep=COALESCE(users.rep, 0)+?",
             guild_id, user_id, amount, amount,
         )
 
@@ -331,12 +391,11 @@ class Database:
         return row["r"] if row else 0
 
     async def create_ticket(self, guild_id, user_id, topic, details=None):
-        cur = await self.execute(
+        return await self._execute_returning_id(
             "INSERT INTO tickets (guild_id, channel_id, user_id, topic, details) "
             "VALUES (?, 0, ?, ?, ?)",
             guild_id, user_id, topic, details,
         )
-        return cur.lastrowid
 
     async def get_open_ticket(self, guild_id: int, user_id: int):
         return await self.fetchone(
@@ -356,11 +415,10 @@ class Database:
         )
 
     async def add_shop_item(self, guild_id: int, role_id: int | None, price: int, name: str, description: str | None = None):
-        cur = await self.execute(
+        return await self._execute_returning_id(
             "INSERT INTO shop_items (guild_id, role_id, price, name, description) VALUES (?, ?, ?, ?, ?)",
             guild_id, role_id, price, name, description,
         )
-        return cur.lastrowid
 
     async def get_shop_items(self, guild_id: int):
         return await self.fetchall(
@@ -383,16 +441,15 @@ class Database:
         prize_name: str | None, amount: int | None,
         uses_left: int, created_by: int,
     ) -> int:
-        cur = await self.execute(
+        return await self._execute_returning_id(
             "INSERT INTO promocodes (guild_id, code, type, prize_name, amount, uses_left, created_by) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             guild_id, code, ptype, prize_name, amount, uses_left, created_by,
         )
-        return cur.lastrowid
 
     async def get_promocode(self, guild_id: int, code: str):
         return await self.fetchone(
-            "SELECT * FROM promocodes WHERE guild_id=? AND code=? COLLATE NOCASE AND active=1",
+            "SELECT * FROM promocodes WHERE guild_id=? AND code ILIKE ? AND active=1",
             guild_id, code,
         )
 
@@ -405,7 +462,7 @@ class Database:
                 "INSERT INTO promo_redemptions (promocode_id, guild_id, user_id) VALUES (?, ?, ?)",
                 promocode_id, guild_id, user_id,
             )
-        except Exception:
+        except asyncpg.UniqueViolationError:
             return False
 
         cur = await self.execute(
