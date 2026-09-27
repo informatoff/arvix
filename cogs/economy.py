@@ -165,6 +165,38 @@ class Economy(commands.Cog):
         embed.set_footer(text=_ts())
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(name="takeac", description="Забрать монеты у пользователя")
+    @app_commands.describe(member="У кого забрать", amount="Количество монет")
+    @app_commands.guild_only()
+    async def takeac(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        s = await self.bot.db.get_settings(interaction.guild_id)
+        if not _can_give_coins(interaction, s):
+            return await interaction.response.send_message(
+                "У вас нет прав для списания монет. Настройте роль через `/settings`.", ephemeral=True
+            )
+        if member.bot:
+            return await interaction.response.send_message("Нельзя забрать монеты у бота.", ephemeral=True)
+        if amount <= 0:
+            return await interaction.response.send_message("Сумма должна быть положительной.", ephemeral=True)
+
+        u = await self.bot.db.get_user(interaction.guild_id, member.id)
+        if u["coins"] < amount:
+            return await interaction.response.send_message(
+                f"Недостаточно монет на балансе. Баланс {member.mention}: **{u['coins']:,} 🪙**, "
+                f"списать: **{amount:,} 🪙**.",
+                ephemeral=True,
+            )
+
+        await self.bot.db.add_coins(interaction.guild_id, member.id, -amount)
+
+        embed = discord.Embed(
+            title="Списание монет",
+            description=f"Модератор {interaction.user.mention} забрал **{amount:,} 🪙** у пользователя {member.mention}.",
+            color=config.WARN_COLOR,
+        )
+        embed.set_footer(text=_ts())
+        await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="shop", description="Магазин Arvix")
     @app_commands.guild_only()
     async def shop(self, interaction: discord.Interaction):
