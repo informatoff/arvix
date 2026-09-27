@@ -6,8 +6,13 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = int(os.getenv("DEV_GUILD_ID") or 0) or None
-# Railway автоматически подставляет DATABASE_URL при подключении Postgres-плагина к сервису.
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Railway's Postgres plugin injects DATABASE_URL automatically once the
+# plugin is attached to this service. asyncpg doesn't understand the
+# "postgres://" scheme some providers use, so normalize it to "postgresql://".
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
 
 BRAND_COLOR = 0x7C5CFF
 SUCCESS_COLOR = 0x43B581
