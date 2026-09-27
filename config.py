@@ -6,7 +6,8 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = int(os.getenv("DEV_GUILD_ID") or 0) or None
-DB_PATH = os.getenv("DB_PATH", "arvix.db")
+# Railway автоматически подставляет DATABASE_URL при подключении Postgres-плагина к сервису.
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 BRAND_COLOR = 0x7C5CFF
 SUCCESS_COLOR = 0x43B581
