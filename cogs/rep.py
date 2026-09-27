@@ -51,7 +51,7 @@ class RepModal(discord.ui.Modal, title="Оставить отзыв"):
             color=discord.Color.from_rgb(255, 255, 255),
         )
         embed.description = f"{_stars_display(self.rating)}\n\n{text}"
-        embed.set_footer(text=f"{self.nickname.value.strip()} • {_ts().strftime('%d.%m.%Y')}")
+        embed.set_footer(text=self.nickname.value.strip())
         embed.timestamp = _ts()
 
         channel = interaction.guild.get_channel(REP_CHANNEL_ID) if interaction.guild else None
