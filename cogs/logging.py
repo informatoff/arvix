@@ -1,4 +1,6 @@
 from datetime import datetime, timezone, timedelta
+from typing import Optional
+
 import discord
 from discord.ext import commands
 
@@ -9,6 +11,16 @@ MSK = timezone(timedelta(hours=3))
 
 def _ts() -> str:
     return datetime.now(MSK).strftime("Сегодня, в %H:%M")
+
+
+def _fmt_dt(dt: Optional[datetime]) -> str:
+    if not dt:
+        return "неизвестно"
+    return f"<t:{int(dt.timestamp())}:f> (<t:{int(dt.timestamp())}:R>)"
+
+
+def _user_field(u: discord.abc.User) -> str:
+    return f"{u.mention} ({getattr(u, 'display_name', u.name)} | ID: `{u.id}`)"
 
 
 class MemberCountView(discord.ui.View):
@@ -27,15 +39,75 @@ class Logging(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ---------- вспомогательное ----------
+
+    async def _member_log_channel(self, guild: discord.Guild):
+        s = await self.bot.db.get_settings(guild.id)
+        if not s:
+            return None
+        try:
+            ch_id = s["memberlog_channel_id"]
+        except (KeyError, IndexError):
+            return None
+        return guild.get_channel(ch_id) if ch_id else None
+
+    async def _audit_actor(
+        self,
+        guild: discord.Guild,
+        action: discord.AuditLogAction,
+        target_id: int,
+        max_age: int = 15,
+    ):
+        """Ищет в аудит-логе, кто совершил действие. Возвращает (user, reason)."""
+        me = guild.me
+        if not me or not me.guild_permissions.view_audit_log:
+            return None, None
+        try:
+            async for entry in guild.audit_logs(limit=10, action=action):
+                if getattr(entry.target, "id", None) != target_id:
+                    continue
+                age = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
+                if age > max_age:
+                    continue
+                return entry.user, entry.reason
+        except discord.HTTPException:
+            pass
+        return None, None
+
+    async def _send(self, ch, embed: discord.Embed):
+        try:
+            await ch.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+    # ---------- вход: лог участников + приветствие ----------
+
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        if member.bot or not member.guild:
+        if not member.guild:
             return
 
+        # лог участников (включая ботов)
+        mch = await self._member_log_channel(member.guild)
+        if mch:
+            embed = discord.Embed(
+                title=f"📥 Участник зашёл — {member.name}",
+                color=0x57F287,
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
+            embed.add_field(name="🗓️ Аккаунт создан", value=_fmt_dt(member.created_at), inline=False)
+            embed.add_field(name="🔢 Участник №", value=str(member.guild.member_count), inline=True)
+            embed.add_field(name="🤖 Бот", value="Да" if member.bot else "Нет", inline=True)
+            embed.set_footer(text=f"ID: {member.id} • {_ts()}")
+            await self._send(mch, embed)
+
+        # приветствие
+        if member.bot:
+            return
         s = await self.bot.db.get_settings(member.guild.id)
         if not s or not s["welcome_channel_id"]:
             return
-
         ch = member.guild.get_channel(s["welcome_channel_id"])
         if not ch:
             return
@@ -59,6 +131,176 @@ class Logging(commands.Cog):
         except discord.HTTPException:
             pass
 
+    # ---------- выход / кик ----------
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        if not member.guild:
+            return
+        ch = await self._member_log_channel(member.guild)
+        if not ch:
+            return
+
+        kicker, kick_reason = await self._audit_actor(
+            member.guild, discord.AuditLogAction.kick, member.id
+        )
+
+        if kicker:
+            title, color = f"👢 Участник исключён — {member.name}", 0xFEE75C
+        else:
+            title, color = f"📤 Участник вышел — {member.name}", 0xED4245
+
+        embed = discord.Embed(title=title, color=color)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
+        if kicker:
+            embed.add_field(name="🛡️ Модератор", value=_user_field(kicker), inline=False)
+            embed.add_field(name="📄 Причина", value=f"`{kick_reason or 'Не указана'}`", inline=False)
+        embed.add_field(name="📅 Был на сервере с", value=_fmt_dt(member.joined_at), inline=False)
+
+        roles = [r.mention for r in reversed(member.roles) if r != member.guild.default_role]
+        if roles:
+            embed.add_field(
+                name=f"🏷️ Роли ({len(roles)})",
+                value=" ".join(roles)[:1000],
+                inline=False,
+            )
+        embed.set_footer(text=f"ID: {member.id} • {_ts()}")
+        await self._send(ch, embed)
+
+    # ---------- роли и ник ----------
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if not after.guild:
+            return
+
+        roles_changed = before.roles != after.roles
+        nick_changed = before.nick != after.nick
+        if not (roles_changed or nick_changed):
+            return
+
+        ch = await self._member_log_channel(after.guild)
+        if not ch:
+            return
+
+        if roles_changed:
+            before_ids = {r.id for r in before.roles}
+            after_ids = {r.id for r in after.roles}
+            added = [r for r in after.roles if r.id not in before_ids]
+            removed = [r for r in before.roles if r.id not in after_ids]
+
+            if added or removed:
+                actor, _ = await self._audit_actor(
+                    after.guild, discord.AuditLogAction.member_role_update, after.id
+                )
+
+                if added and not removed:
+                    title, color = f"➕ Выдана роль — {after.name}", 0x57F287
+                elif removed and not added:
+                    title, color = f"➖ Снята роль — {after.name}", 0xED4245
+                else:
+                    title, color = f"🔁 Изменены роли — {after.name}", 0x5865F2
+
+                embed = discord.Embed(title=title, color=color)
+                embed.set_thumbnail(url=after.display_avatar.url)
+                embed.add_field(name="👤 Пользователь", value=_user_field(after), inline=False)
+                if added:
+                    embed.add_field(
+                        name="✅ Выданы",
+                        value=" ".join(r.mention for r in added)[:1000],
+                        inline=False,
+                    )
+                if removed:
+                    embed.add_field(
+                        name="❌ Сняты",
+                        value=" ".join(r.mention for r in removed)[:1000],
+                        inline=False,
+                    )
+                embed.add_field(
+                    name="🛡️ Кто изменил",
+                    value=_user_field(actor) if actor else "неизвестно",
+                    inline=False,
+                )
+                embed.set_footer(text=f"ID: {after.id} • {_ts()}")
+                await self._send(ch, embed)
+
+        if nick_changed:
+            actor, _ = await self._audit_actor(
+                after.guild, discord.AuditLogAction.member_update, after.id
+            )
+            embed = discord.Embed(title=f"✏️ Смена ника — {after.name}", color=0xFEE75C)
+            embed.set_thumbnail(url=after.display_avatar.url)
+            embed.add_field(name="👤 Пользователь", value=_user_field(after), inline=False)
+            embed.add_field(name="📝 Было", value=before.nick or "*без ника*", inline=True)
+            embed.add_field(name="📝 Стало", value=after.nick or "*без ника*", inline=True)
+            embed.add_field(
+                name="🛡️ Кто изменил",
+                value=_user_field(actor) if actor else "неизвестно",
+                inline=False,
+            )
+            embed.set_footer(text=f"ID: {after.id} • {_ts()}")
+            await self._send(ch, embed)
+
+    # ---------- аватар и имя пользователя ----------
+
+    @commands.Cog.listener()
+    async def on_user_update(self, before: discord.User, after: discord.User):
+        avatar_changed = before.avatar != after.avatar
+        name_changed = before.name != after.name
+        gname_changed = before.global_name != after.global_name
+        if not (avatar_changed or name_changed or gname_changed):
+            return
+
+        for guild in self.bot.guilds:
+            member = guild.get_member(after.id)
+            if not member:
+                continue
+            ch = await self._member_log_channel(guild)
+            if not ch:
+                continue
+
+            if avatar_changed:
+                embed = discord.Embed(title=f"🖼️ Смена аватара — {after.name}", color=0x5865F2)
+                embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
+                if before.avatar:
+                    embed.add_field(
+                        name="Было",
+                        value=f"[ссылка]({before.avatar.replace(size=1024).url})",
+                        inline=True,
+                    )
+                embed.add_field(
+                    name="Стало",
+                    value=f"[ссылка]({after.display_avatar.replace(size=1024).url})",
+                    inline=True,
+                )
+                embed.set_thumbnail(url=after.display_avatar.url)
+                embed.set_footer(text=f"ID: {after.id} • {_ts()}")
+                await self._send(ch, embed)
+
+            if name_changed or gname_changed:
+                embed = discord.Embed(title=f"🏷️ Смена имени — {after.name}", color=0xFEE75C)
+                embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
+                if name_changed:
+                    embed.add_field(name="Username было", value=f"`{before.name}`", inline=True)
+                    embed.add_field(name="Username стало", value=f"`{after.name}`", inline=True)
+                if gname_changed:
+                    embed.add_field(
+                        name="Отображаемое имя было",
+                        value=before.global_name or "*нет*",
+                        inline=False,
+                    )
+                    embed.add_field(
+                        name="Отображаемое имя стало",
+                        value=after.global_name or "*нет*",
+                        inline=False,
+                    )
+                embed.set_thumbnail(url=after.display_avatar.url)
+                embed.set_footer(text=f"ID: {after.id} • {_ts()}")
+                await self._send(ch, embed)
+
+    # ---------- сообщения ----------
+
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if after.author.bot or not after.guild:
@@ -78,22 +320,14 @@ class Logging(commands.Cog):
             title=f"✏️ Сообщение изменено — {after.author.name}",
             color=0xFEE75C,
         )
-        embed.add_field(
-            name="👤 Пользователь",
-            value=f"{after.author.mention} ({after.author.display_name} | ID: `{after.author.id}`)",
-            inline=False,
-        )
+        embed.add_field(name="👤 Пользователь", value=_user_field(after.author), inline=False)
         embed.add_field(name="📍 Канал", value=after.channel.mention, inline=False)
         b_content = before.content[:1000] if before.content else "*Нет текста*"
         a_content = after.content[:1000] if after.content else "*Нет текста*"
         embed.add_field(name="📝 Было", value=b_content, inline=False)
         embed.add_field(name="📝 Стало", value=a_content, inline=False)
         embed.set_footer(text=f"ID сообщения: {after.id} • {_ts()}")
-
-        try:
-            await ch.send(embed=embed)
-        except discord.HTTPException:
-            pass
+        await self._send(ch, embed)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message):
@@ -112,23 +346,19 @@ class Logging(commands.Cog):
             title=f"🗑️ Сообщение удалено — {message.author.name}",
             color=0xED4245,
         )
-        embed.add_field(
-            name="👤 Пользователь",
-            value=f"{message.author.mention} ({message.author.display_name} | ID: `{message.author.id}`)",
-            inline=False,
-        )
+        embed.add_field(name="👤 Пользователь", value=_user_field(message.author), inline=False)
         embed.add_field(name="📍 Канал", value=message.channel.mention, inline=False)
         content = message.content[:1000] if message.content else "*[Вложение или пусто]*"
         embed.add_field(name="📝 Текст", value=content, inline=False)
         embed.set_footer(text=f"ID сообщения: {message.id} • {_ts()}")
+        await self._send(ch, embed)
 
-        try:
-            await ch.send(embed=embed)
-        except discord.HTTPException:
-            pass
+    # ---------- войс ----------
 
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    async def on_voice_state_update(
+        self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+    ):
         if member.bot or not member.guild:
             return
 
@@ -142,48 +372,24 @@ class Logging(commands.Cog):
 
         embed = None
         if before.channel is None and after.channel is not None:
-            embed = discord.Embed(
-                title=f"🔊 Подключение к войсу — {member.name}",
-                color=0x57F287,
-            )
-            embed.add_field(
-                name="👤 Пользователь",
-                value=f"{member.mention} ({member.display_name} | ID: `{member.id}`)",
-                inline=False,
-            )
+            embed = discord.Embed(title=f"🔊 Подключение к войсу — {member.name}", color=0x57F287)
+            embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
             embed.add_field(name="📍 Канал", value=after.channel.mention, inline=False)
             embed.set_footer(text=_ts())
         elif before.channel is not None and after.channel is None:
-            embed = discord.Embed(
-                title=f"🔇 Отключение от войса — {member.name}",
-                color=0xED4245,
-            )
-            embed.add_field(
-                name="👤 Пользователь",
-                value=f"{member.mention} ({member.display_name} | ID: `{member.id}`)",
-                inline=False,
-            )
+            embed = discord.Embed(title=f"🔇 Отключение от войса — {member.name}", color=0xED4245)
+            embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
             embed.add_field(name="📍 Канал", value=before.channel.mention, inline=False)
             embed.set_footer(text=_ts())
         elif before.channel != after.channel and before.channel is not None and after.channel is not None:
-            embed = discord.Embed(
-                title=f"🔄 Перемещение по войсам — {member.name}",
-                color=0x5865F2,
-            )
-            embed.add_field(
-                name="👤 Пользователь",
-                value=f"{member.mention} ({member.display_name} | ID: `{member.id}`)",
-                inline=False,
-            )
+            embed = discord.Embed(title=f"🔄 Перемещение по войсам — {member.name}", color=0x5865F2)
+            embed.add_field(name="👤 Пользователь", value=_user_field(member), inline=False)
             embed.add_field(name="📍 Было", value=before.channel.mention, inline=True)
             embed.add_field(name="📍 Стало", value=after.channel.mention, inline=True)
             embed.set_footer(text=_ts())
 
         if embed:
-            try:
-                await ch.send(embed=embed)
-            except discord.HTTPException:
-                pass
+            await self._send(ch, embed)
 
 
 async def setup(bot):
