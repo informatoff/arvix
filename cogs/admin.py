@@ -10,14 +10,13 @@ SETTING_MAP = {
     "modlog_channel_id":          ("Канал модлога", "channel", [discord.ChannelType.text]),
     "msglog_channel_id":          ("Канал логов сообщений", "channel", [discord.ChannelType.text]),
     "voicelog_channel_id":        ("Канал логов войса", "channel", [discord.ChannelType.text]),
+    "memberlog_channel_id":       ("Канал логов участников", "channel", [discord.ChannelType.text]),
     "levelup_channel_id":         ("Канал уровней", "channel", [discord.ChannelType.text]),
     "ticket_category_id":         ("Категория тикетов", "channel", [discord.ChannelType.category]),
     "ticket_role_id":             ("Роль поддержки", "role", None),
     "ticket_log_channel_id":      ("Канал логов тикетов", "channel", [discord.ChannelType.text]),
     "ticket_archive_category_id": ("Категория архива тикетов", "channel", [discord.ChannelType.category]),
     "give_role_id":               ("Роль для /give", "role", None),
-    "take_role_id":               ("Роль для /takeac", "role", None),
-    "promo_role_id":              ("Роль для /promoadd", "role", None),
 }
 
 
@@ -28,7 +27,10 @@ def _build_settings_embed(settings) -> discord.Embed:
         color=config.BRAND_COLOR,
     )
     for key, (label, typ, _) in SETTING_MAP.items():
-        val = settings[key] if settings and settings[key] else None
+        try:
+            val = settings[key] if settings and settings[key] else None
+        except (KeyError, IndexError):
+            val = None
         if typ == "role":
             display = f"<@&{val}>" if val else "не задана"
         elif "category" in key:
