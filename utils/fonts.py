@@ -13,7 +13,7 @@ MONTSERRAT_URLS = (
     "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
 )
 
-# ---------- DejaVu Sans (запасной, для small caps и прочих символов) ----------
+# ---------- DejaVu Sans (запасной: small caps и прочие символы) ----------
 DEJAVU_BOLD = FONT_DIR / "DejaVuSans-Bold.ttf"
 DEJAVU_REGULAR = FONT_DIR / "DejaVuSans.ttf"
 DEJAVU_URLS = {
