@@ -95,4 +95,14 @@ if __name__ == "__main__":
             "На Railway: подключи сервис Postgres к этому проекту — "
             "переменная DATABASE_URL появится автоматически (обычно через Variable Reference)."
         )
-    Arvix().run(config.TOKEN)
+
+    try:
+        Arvix().run(config.TOKEN)
+    except discord.HTTPException as e:
+        if e.status == 429:
+            # Cloudflare (Error 1015) / Discord rate limit: банит IP при частых
+            # попытках логина. Ждём перед выходом, чтобы Railway не уходил
+            # в быстрый цикл рестартов и не продлевал бан.
+            print("Rate limit (429) при логине. Жду 15 минут перед выходом...", flush=True)
+            time.sleep(900)
+        raise
