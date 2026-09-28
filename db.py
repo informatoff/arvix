@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     ticket_log_channel_id      BIGINT,
     ticket_archive_category_id BIGINT,
     give_role_id               BIGINT,
+    take_role_id               BIGINT,
     promo_role_id              BIGINT
 );
 CREATE TABLE IF NOT EXISTS users (
@@ -92,6 +93,7 @@ SETTING_FIELDS = {
     "ticket_log_channel_id",
     "ticket_archive_category_id",
     "give_role_id",
+    "take_role_id",
     "promo_role_id",
 }
 
@@ -104,6 +106,7 @@ _MIGRATE_SETTINGS = [
     "welcome_channel_id BIGINT",
     "ticket_archive_category_id BIGINT",
     "give_role_id BIGINT",
+    "take_role_id BIGINT",
     "promo_role_id BIGINT",
 ]
 _MIGRATE_TICKETS = [
@@ -278,6 +281,18 @@ class Database:
             "ON CONFLICT(guild_id, user_id) DO UPDATE SET coins=users.coins+?",
             guild_id, user_id, amount, amount,
         )
+
+    async def take_coins(self, guild_id: int, user_id: int, amount: int) -> int:
+        """Забирает монеты, но не уводит баланс в минус.
+        Возвращает, сколько реально было снято."""
+        u = await self.get_user(guild_id, user_id)
+        taken = min(amount, max(u["coins"], 0))
+        if taken > 0:
+            await self.execute(
+                "UPDATE users SET coins=coins-? WHERE guild_id=? AND user_id=?",
+                taken, guild_id, user_id,
+            )
+        return taken
 
     async def transfer_coins(self, guild_id: int, from_user: int, to_user: int, amount: int) -> bool:
         u_from = await self.get_user(guild_id, from_user)
