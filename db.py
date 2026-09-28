@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     modlog_channel_id          BIGINT,
     msglog_channel_id          BIGINT,
     voicelog_channel_id        BIGINT,
+    memberlog_channel_id       BIGINT,
     levelup_channel_id         BIGINT,
     welcome_channel_id         BIGINT,
     ticket_category_id         BIGINT,
@@ -35,8 +36,23 @@ CREATE TABLE IF NOT EXISTS users (
     rep           INTEGER DEFAULT 0,
     messages      INTEGER DEFAULT 0,
     voice_seconds INTEGER DEFAULT 0,
+    joined_at     TIMESTAMPTZ,
     PRIMARY KEY (guild_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS member_events (
+    id         SERIAL PRIMARY KEY,
+    guild_id   BIGINT NOT NULL,
+    user_id    BIGINT NOT NULL,
+    event      TEXT NOT NULL,
+    actor_id   BIGINT,
+    reason     TEXT,
+    details    TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_member_events_guild_user
+    ON member_events (guild_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_member_events_guild_time
+    ON member_events (guild_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS tickets (
     id         SERIAL PRIMARY KEY,
     guild_id   BIGINT,
@@ -86,6 +102,7 @@ SETTING_FIELDS = {
     "modlog_channel_id",
     "msglog_channel_id",
     "voicelog_channel_id",
+    "memberlog_channel_id",
     "levelup_channel_id",
     "welcome_channel_id",
     "ticket_category_id",
@@ -97,11 +114,24 @@ SETTING_FIELDS = {
     "promo_role_id",
 }
 
+# Допустимые типы событий участников (для member_events)
+MEMBER_EVENTS = {
+    "join",
+    "leave",
+    "kick",
+    "role_add",
+    "role_remove",
+    "nick_change",
+    "avatar_change",
+    "name_change",
+}
+
 # Columns that must exist; applied with ADD COLUMN IF NOT EXISTS on connect,
 # so both fresh and pre-existing Postgres databases end up consistent.
 _MIGRATE_SETTINGS = [
     "msglog_channel_id BIGINT",
     "voicelog_channel_id BIGINT",
+    "memberlog_channel_id BIGINT",
     "levelup_channel_id BIGINT",
     "welcome_channel_id BIGINT",
     "ticket_archive_category_id BIGINT",
@@ -118,6 +148,7 @@ _MIGRATE_TICKETS = [
 _MIGRATE_USERS = [
     "bank BIGINT DEFAULT 0",
     "rep INTEGER DEFAULT 0",
+    "joined_at TIMESTAMPTZ",
 ]
 _MIGRATE_SHOP = [
     "description TEXT",
@@ -160,6 +191,15 @@ class _ExecResult:
         self.rowcount = rowcount
 
 
+def _rowcount(status: str) -> int:
+    # asyncpg status strings look like "UPDATE 3", "INSERT 0 1", "DELETE 1"
+    if status:
+        tail = status.strip().split()[-1]
+        if tail.isdigit():
+            return int(tail)
+    return 0
+
+
 class Database:
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -170,26 +210,19 @@ class Database:
         async with self.pool.acquire() as conn:
             for statement in filter(None, (s.strip() for s in SCHEMA.split(";"))):
                 await conn.execute(statement)
-            for col in _MIGRATE_SETTINGS:
-                try:
-                    await conn.execute(f"ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS {col}")
-                except Exception:
-                    pass
-            for col in _MIGRATE_TICKETS:
-                try:
-                    await conn.execute(f"ALTER TABLE tickets ADD COLUMN IF NOT EXISTS {col}")
-                except Exception:
-                    pass
-            for col in _MIGRATE_USERS:
-                try:
-                    await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col}")
-                except Exception:
-                    pass
-            for col in _MIGRATE_SHOP:
-                try:
-                    await conn.execute(f"ALTER TABLE shop_items ADD COLUMN IF NOT EXISTS {col}")
-                except Exception:
-                    pass
+            for table, cols in (
+                ("guild_settings", _MIGRATE_SETTINGS),
+                ("tickets", _MIGRATE_TICKETS),
+                ("users", _MIGRATE_USERS),
+                ("shop_items", _MIGRATE_SHOP),
+            ):
+                for col in cols:
+                    try:
+                        await conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col}"
+                        )
+                    except Exception:
+                        pass
 
     async def close(self):
         if self.pool:
@@ -200,13 +233,7 @@ class Database:
         pg_query = _to_pg(query)
         async with self.pool.acquire() as conn:
             status = await conn.execute(pg_query, *args)
-        # asyncpg status strings look like "UPDATE 3", "INSERT 0 1", "DELETE 1"
-        rowcount = 0
-        if status:
-            tail = status.strip().split()[-1]
-            if tail.isdigit():
-                rowcount = int(tail)
-        return _ExecResult(lastrowid=None, rowcount=rowcount)
+        return _ExecResult(lastrowid=None, rowcount=_rowcount(status))
 
     async def _execute_returning_id(self, query: str, *args) -> int:
         pg_query = _to_pg(query)
@@ -228,6 +255,10 @@ class Database:
             rows = await conn.fetch(pg_query, *args)
         return [_wrap(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Настройки
+    # ------------------------------------------------------------------
+
     async def get_settings(self, guild_id: int):
         return await self.fetchone(
             "SELECT * FROM guild_settings WHERE guild_id=?", guild_id
@@ -243,6 +274,86 @@ class Database:
             f"ON CONFLICT(guild_id) DO UPDATE SET {updates}",
             guild_id, *fields.values(),
         )
+
+    # ------------------------------------------------------------------
+    # Логирование участников
+    # ------------------------------------------------------------------
+
+    async def log_member_event(
+        self,
+        guild_id: int,
+        user_id: int,
+        event: str,
+        actor_id: int | None = None,
+        reason: str | None = None,
+        details: str | None = None,
+    ) -> int:
+        """Записывает событие участника (join/leave/kick/role_add/...)."""
+        assert event in MEMBER_EVENTS, f"unknown member event: {event}"
+        return await self._execute_returning_id(
+            "INSERT INTO member_events (guild_id, user_id, event, actor_id, reason, details) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            guild_id, user_id, event, actor_id, reason, details,
+        )
+
+    async def get_member_events(
+        self,
+        guild_id: int,
+        user_id: int | None = None,
+        event: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ):
+        """История событий участника (или всего сервера, если user_id не задан)."""
+        where = ["guild_id=?"]
+        args: list = [guild_id]
+        if user_id is not None:
+            where.append("user_id=?")
+            args.append(user_id)
+        if event is not None:
+            where.append("event=?")
+            args.append(event)
+        args += [limit, offset]
+        return await self.fetchall(
+            f"SELECT * FROM member_events WHERE {' AND '.join(where)} "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            *args,
+        )
+
+    async def count_member_events(
+        self, guild_id: int, event: str, user_id: int | None = None
+    ) -> int:
+        if user_id is None:
+            row = await self.fetchone(
+                "SELECT COUNT(*) AS c FROM member_events WHERE guild_id=? AND event=?",
+                guild_id, event,
+            )
+        else:
+            row = await self.fetchone(
+                "SELECT COUNT(*) AS c FROM member_events "
+                "WHERE guild_id=? AND event=? AND user_id=?",
+                guild_id, event, user_id,
+            )
+        return row["c"] if row else 0
+
+    async def set_joined_at(self, guild_id: int, user_id: int, joined_at):
+        """Запоминает дату входа участника (перезаписывает при повторном входе)."""
+        await self.execute(
+            "INSERT INTO users (guild_id, user_id, joined_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id, user_id) DO UPDATE SET joined_at=EXCLUDED.joined_at",
+            guild_id, user_id, joined_at,
+        )
+
+    async def get_joined_at(self, guild_id: int, user_id: int):
+        row = await self.fetchone(
+            "SELECT joined_at FROM users WHERE guild_id=? AND user_id=?",
+            guild_id, user_id,
+        )
+        return row["joined_at"] if row else None
+
+    # ------------------------------------------------------------------
+    # Пользователи / экономика
+    # ------------------------------------------------------------------
 
     async def get_user(self, guild_id: int, user_id: int) -> dict:
         row = await self.fetchone(
@@ -336,6 +447,10 @@ class Database:
             guild_id, user_id, amount, amount,
         )
 
+    # ------------------------------------------------------------------
+    # Рейтинги
+    # ------------------------------------------------------------------
+
     async def get_ranks(self, guild_id: int, u: dict):
         by_level = await self.fetchone(
             "SELECT COUNT(*)+1 AS r FROM users WHERE guild_id=? "
@@ -405,6 +520,10 @@ class Database:
             return 0
         return row["r"] if row else 0
 
+    # ------------------------------------------------------------------
+    # Тикеты
+    # ------------------------------------------------------------------
+
     async def create_ticket(self, guild_id, user_id, topic, details=None):
         return await self._execute_returning_id(
             "INSERT INTO tickets (guild_id, channel_id, user_id, topic, details) "
@@ -429,6 +548,10 @@ class Database:
             f"UPDATE tickets SET {sets} WHERE id=?", *fields.values(), ticket_id
         )
 
+    # ------------------------------------------------------------------
+    # Магазин
+    # ------------------------------------------------------------------
+
     async def add_shop_item(self, guild_id: int, role_id: int | None, price: int, name: str, description: str | None = None):
         return await self._execute_returning_id(
             "INSERT INTO shop_items (guild_id, role_id, price, name, description) VALUES (?, ?, ?, ?, ?)",
@@ -451,6 +574,10 @@ class Database:
         )
         return cur.rowcount > 0
 
+    # ------------------------------------------------------------------
+    # Промокоды
+    # ------------------------------------------------------------------
+
     async def create_promocode(
         self, guild_id: int, code: str, ptype: int,
         prize_name: str | None, amount: int | None,
@@ -469,30 +596,34 @@ class Database:
         )
 
     async def redeem_promocode(self, promocode_id: int, guild_id: int, user_id: int) -> bool:
-        """Atomically records a redemption and decrements uses_left.
-        Returns True if redemption succeeded, False if already used by this user
-        or no uses remain."""
-        try:
-            await self.execute(
-                "INSERT INTO promo_redemptions (promocode_id, guild_id, user_id) VALUES (?, ?, ?)",
-                promocode_id, guild_id, user_id,
-            )
-        except asyncpg.UniqueViolationError:
-            return False
+        """Атомарно записывает активацию и уменьшает uses_left.
+        Возвращает True при успехе, False — если код уже использован этим
+        пользователем или использования закончились."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                status = await conn.execute(
+                    "INSERT INTO promo_redemptions (promocode_id, guild_id, user_id) "
+                    "VALUES ($1, $2, $3) ON CONFLICT (promocode_id, user_id) DO NOTHING",
+                    promocode_id, guild_id, user_id,
+                )
+                if _rowcount(status) == 0:
+                    return False  # уже активировал
 
-        cur = await self.execute(
-            "UPDATE promocodes SET uses_left = uses_left - 1 "
-            "WHERE id=? AND uses_left > 0",
-            promocode_id,
-        )
-        if cur.rowcount == 0:
-            await self.execute(
-                "DELETE FROM promo_redemptions WHERE promocode_id=? AND user_id=?",
-                promocode_id, user_id,
-            )
-            return False
+                status = await conn.execute(
+                    "UPDATE promocodes SET uses_left = uses_left - 1 "
+                    "WHERE id=$1 AND uses_left > 0",
+                    promocode_id,
+                )
+                if _rowcount(status) == 0:
+                    # использований не осталось — откатываем всю транзакцию
+                    raise _RollbackPromo()
 
-        cur2 = await self.fetchone("SELECT uses_left FROM promocodes WHERE id=?", promocode_id)
-        if cur2 and cur2["uses_left"] <= 0:
-            await self.execute("UPDATE promocodes SET active=0 WHERE id=?", promocode_id)
+                await conn.execute(
+                    "UPDATE promocodes SET active=0 WHERE id=$1 AND uses_left <= 0",
+                    promocode_id,
+                )
         return True
+
+
+class _RollbackPromo(Exception):
+    pass
