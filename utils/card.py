@@ -25,6 +25,22 @@ STATIC_FONTS = {
     800: "Montserrat-ExtraBold.ttf",
 }
 
+# Запасные шрифты (для символов, которых нет в Montserrat: small caps и т.п.)
+FALLBACK_FILES = (
+    "DejaVuSans-Bold.ttf",
+    "DejaVuSans.ttf",
+    "NotoSans-Bold.ttf",
+    "NotoSans-Regular.ttf",
+    "NotoSansMath-Regular.ttf",
+    "NotoSansSymbols2-Regular.ttf",
+)
+SYSTEM_FONT_DIRS = (
+    Path("/usr/share/fonts/truetype/dejavu"),
+    Path("/usr/share/fonts/dejavu"),
+    Path("/usr/share/fonts/TTF"),
+    Path("C:/Windows/Fonts"),
+)
+
 
 @lru_cache(maxsize=None)
 def font(size: int, weight: int = 700) -> ImageFont.FreeTypeFont:
@@ -50,6 +66,75 @@ def font(size: int, weight: int = 700) -> ImageFont.FreeTypeFont:
             continue
     return ImageFont.load_default(size)
 
+
+# ---------- Поддержка нестандартных символов в нике ----------
+
+@lru_cache(maxsize=None)
+def fallback_fonts(size: int) -> tuple:
+    out = []
+    for name in FALLBACK_FILES:
+        for base in (FONT_DIR, *SYSTEM_FONT_DIRS):
+            p = base / name
+            if p.exists():
+                try:
+                    out.append(ImageFont.truetype(str(p), size))
+                except OSError:
+                    pass
+                break
+    return tuple(out)
+
+
+def _glyph_signature(f: ImageFont.FreeTypeFont, ch: str):
+    m = f.getmask(ch)
+    return m.size, bytes(m)
+
+
+@lru_cache(maxsize=None)
+def _missing_signature(font_id: int, size: int, path_key: str):
+    return None
+
+
+def _has_glyph(f: ImageFont.FreeTypeFont, ch: str) -> bool:
+    if ch.isspace():
+        return True
+    try:
+        sig = _glyph_signature(f, ch)
+        # символы, которых точно нет ни в одном шрифте -> рисуются как .notdef
+        for probe in ("\uFFFF", "\uFDD0"):
+            if sig == _glyph_signature(f, probe):
+                return False
+        return sig[0] != (0, 0) or ch.isspace()
+    except Exception:
+        return False
+
+
+def pick_font(ch: str, size: int, weight: int):
+    main = font(size, weight)
+    if _has_glyph(main, ch):
+        return main
+    for fb in fallback_fonts(size):
+        if _has_glyph(fb, ch):
+            return fb
+    return main
+
+
+def draw_text_fallback(d, xy, text, size, weight, fill, anchor="mm"):
+    """Рисует текст посимвольно с подстановкой шрифта. anchor: 'mm' | 'lm' | 'rm'."""
+    x, y = xy
+    parts = [(ch, pick_font(ch, size, weight)) for ch in text]
+    total = sum(f.getlength(ch) for ch, f in parts)
+
+    if anchor[0] == "m":
+        x -= total / 2
+    elif anchor[0] == "r":
+        x -= total
+
+    for ch, f in parts:
+        d.text((x, y), ch, font=f, fill=fill, anchor="lm")
+        x += f.getlength(ch)
+
+
+# ---------- Остальная графика ----------
 
 def _rounded_mask(size, radius, scale=4) -> Image.Image:
     big = Image.new("L", (size[0] * scale, size[1] * scale), 0)
@@ -153,7 +238,9 @@ def render_profile(
     mask = Image.new("L", (size * 4, size * 4), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=255)
     img.paste(av, (cx - size // 2, cy - size // 2), mask.resize((size, size), Image.LANCZOS))
-    d.text((cx, 335), str(username)[:20], font=font(26, 700), fill=WHITE, anchor="mm")
+
+    # ник: с поддержкой small caps и других нестандартных символов
+    draw_text_fallback(d, (cx, 335), str(username)[:20], 26, 700, WHITE, "mm")
 
     d.rounded_rectangle((698, 423, 875, 520), radius=26, fill=(46, 46, 46), outline=(84, 84, 84), width=2)
     d.text((786, 455), str(level), font=font(48, 800), fill=WHITE, anchor="mm")
